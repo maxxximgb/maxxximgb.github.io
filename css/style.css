@@ -1,31 +1,24 @@
 .nav-link.active {
-  font-size: 0.40cm;
-  font-weight: bold;
-  cursor: not-allowed;
+    font-size: 0.40cm;
+    font-weight: bold;
+    cursor: not-allowed;
 }
-.carousel {
-  width: 25%;
-}
-.carousel-inner {
-  position: relative;
-  overflow: hidden;
-  border-radius: 15px;
-}
-#carouselExampleIndicators {
-  margin: 0 auto;
-}
+
 .text-center {
-  text-align: center;
+    text-align: center;
 }
+
 .navbar-nav {
-  margin: 0 auto;
-  display: flex;
-  justify-content: right;
+    margin: 0 auto;
+    display: flex;
+    justify-content: right;
 }
+
 body {
-  background-color: #ffffff;
+    background-color: #ffffff;
     color: #fff;
 }
+
 .background {
     position: fixed;
     top: 0;
@@ -35,6 +28,7 @@ body {
     overflow: hidden;
     z-index: -1;
 }
+
 .background video {
     position: absolute;
     top: 50%;
@@ -46,43 +40,72 @@ body {
     z-index: -1;
     transform: translate(-50%, -50%);
 }
+
 .content {
     position: relative;
     z-index: 1;
 }
-.first_award{
-    position:absolute;
-    right:15%;
-    bottom:1.25rem;
-    left:15%;
-    padding-top:1.25rem;
-    padding-bottom:1.25rem;
+
+.first_award {
+    position: absolute;
+    right: 15%;
+    bottom: 1.25rem;
+    left: 15%;
+    padding-top: 1.25rem;
+    padding-bottom: 1.25rem;
     color: #000000;
-    text-align:center;
+    text-align: center;
     font-size: 0.6cm;
     font-weight: bold;
 }
-.second_award{
-    position:absolute;
-    right:15%;
-    bottom:1.25rem;
-    left:15%;
-    padding-top:1.25rem;
-    padding-bottom:1.25rem;
+
+.second_award {
+    position: absolute;
+    right: 15%;
+    bottom: 1.25rem;
+    left: 15%;
+    padding-top: 1.25rem;
+    padding-bottom: 1.25rem;
     color: #000000;
-    text-align:center;
+    text-align: center;
     font-size: 0.6cm;
     font-weight: bold;
 }
-.third_award{
-    position:absolute;
-    right:15%;
-    bottom:1.25rem;
-    left:15%;
-    padding-top:1.25rem;
-    padding-bottom:1.25rem;
+
+.third_award {
+    position: absolute;
+    right: 15%;
+    bottom: 1.25rem;
+    left: 15%;
+    padding-top: 1.25rem;
+    padding-bottom: 1.25rem;
     color: #ff0000;
-    text-align:center;
+    text-align: center;
     font-size: 0.6cm;
     font-weight: bold;
+}
+
+.container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.carousel-item img {
+    object-fit: cover;
+    width: 100%;
+}
+
+.text-block {
+    max-width: 70%;
+}
+
+.carousel {
+    width: 34%;
+}
+
+.carousel-inner {
+    position: relative;
+    overflow: hidden;
+    border-radius: 15px;
 }

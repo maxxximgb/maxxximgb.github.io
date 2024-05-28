@@ -33,13 +33,14 @@ function showSlideNumber() {
     } else if (slideNumber === 2) {
         $('#sec').modal('show');
     } else if (slideNumber === 3) {
-        $('#th').modal('show');
-    } else if (slideNumber === 4) {
-        $('#fth').modal('show');
-    } else if (slideNumber === 5) {
-        $('#ffth').modal('show');
-    } else if (slideNumber === 6) {
         $('#6th').modal('show');
+    } else if (slideNumber === 4) {
+        $('#th').modal('show');
+    } else if (slideNumber === 5) {
+        $('#fth').modal('show');
+    } else if (slideNumber === 6) {
+        $('#ffth').modal('show');
     }
 }
+
 document.querySelector('.btn.btn-primary').addEventListener('click', showSlideNumber);
