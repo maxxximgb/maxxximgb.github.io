@@ -43,8 +43,6 @@ function showSlideNumber() {
     }
 }
 
-document.querySelector('.btn.btn-primary').addEventListener('click', showSlideNumber);
-
 function toggleFullScreen() {
     let videoContainer = document.getElementById('video-container');
     if (!document.fullscreenElement) {
