@@ -1,5 +1,5 @@
 function removeBackground() {
-    if (document.querySelector('.background').style.background !== 'white)' {
+    if (document.querySelector('.background').style.background != 'white') {
         document.querySelector('.background').style.background = 'black';
         document.querySelector('video').remove();
     }
