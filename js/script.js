@@ -1,6 +1,8 @@
 function removeBackground() {
-    document.querySelector('.background').style.background = 'black';
-    document.querySelector('video').remove();
+    if (document.querySelector('.background').style.background !== 'white)' {
+        document.querySelector('.background').style.background = 'black';
+        document.querySelector('video').remove();
+    }
 }
 
 function lightTheme() {
@@ -16,7 +18,7 @@ function lightTheme() {
         }
         element.style.color = 'black';
     });
-    removeBackground()
+    document.querySelector('video').remove();
     document.querySelector('.background').style.background = 'white';
 }
 
