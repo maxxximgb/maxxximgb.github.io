@@ -1,26 +1,18 @@
--- WS Pets Table (undetected-style UI, no external libs)
--- URL: ws://5.255.97.147:6767/script
--- Notes:
---  • Uses executor WebSocket (syn.websocket or WebSocket.connect).
---  • Joins via server-supplied join_script (safe for large PlaceId/JobId).
---  • Stale rows (no updates > STALE_AFTER) are greyed + sorted to bottom.
---  • Teleport uses Roblox TeleportService API semantics. See docs. 
---    (We call the socket-provided join_script to avoid type issues.)
+-- WS Pets Table (no external HTTP) + Players from socket + robust join
+-- ws: ws://5.255.97.147:6767/script
 
--- ========== CONFIG ==========
-local WS_URL       = "ws://5.255.97.147:6767/script"
-local STALE_AFTER  = 45        -- seconds: mark row as stale (grey + drop to bottom)
-local REFRESH_EVERY= 1/2       -- seconds: UI resort & stale repaint tick
-local TITLE        = "Pet Servers (WS)"
-local WINDOW_SIZE  = Vector2.new(580, 360)
+local WS_URL        = "ws://5.255.97.147:6767/script"
+local STALE_AFTER   = 45
+local REFRESH_EVERY = 0.5
+local TITLE         = "Pet Servers (WS)"
+local WINDOW_SIZE   = Vector2.new(640, 380)
 
--- ========== SERVICES ==========
 local Players         = game:GetService("Players")
 local HttpService     = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local LocalPlayer     = Players.LocalPlayer
 
--- ========== UTIL: WebSocket fetcher ==========
+-- WebSocket (executor)
 local function connectWS(url)
     local ws
     if syn and syn.websocket and syn.websocket.connect then
@@ -34,294 +26,303 @@ local function connectWS(url)
     return ws
 end
 
--- ========== UTIL: Money parsing ==========
-local suffix = {
-    k = 1e3, K = 1e3,
-    m = 1e6, M = 1e6,
-    b = 1e9, B = 1e9,
-    t = 1e12, T = 1e12,
-}
+-- Money parser
+local suffix = {k=1e3,K=1e3,m=1e6,M=1e6,b=1e9,B=1e9,t=1e12,T=1e12}
 local function parseMoney(str)
-    -- Accepts: "$2.1M/s", "120M/s", "1.5k", etc.
-    if type(str) ~= "string" then return 0 end
-    -- strip $ and /s and spaces
-    local s = str:gsub("%$", ""):gsub("/s", ""):gsub("%s+", "")
-    -- capture number + optional suffix
+    if type(str)~="string" then return 0 end
+    local s = str:gsub("%$", ""):gsub("/s",""):gsub("%s+","")
     local num, suf = s:match("^([%d%.]+)([kKmMbBtT]?)$")
-    if not num then
-        -- try more permissive (like "$2.1M/s")
-        num, suf = s:match("^([%d%.]+)([kKmMbBtT]?).*$")
-    end
+    if not num then num, suf = s:match("^([%d%.]+)([kKmMbBtT]?).*$") end
     num = tonumber(num or "0") or 0
-    local mult = 1
-    if suf and suf ~= "" then mult = suffix[suf] or 1 end
-    return num * mult
+    return num * (suffix[suf or ""] or 1)
 end
 
--- ========== MICRO-UI (undetected-ish, single-file, generic styling) ==========
+-- Players parser (from socket payload)
+local function parsePlayers(d)
+    -- 1) explicit "players": "6/8" or {playing,max}
+    local pC, pM
+    if type(d.players)=="string" then
+        local a,b = d.players:match("(%d+)%s*/%s*(%d+)")
+        if a and b then pC, pM = tonumber(a), tonumber(b) end
+    elseif type(d.players)=="table" then
+        if d.players.playing and d.players.max then
+            pC, pM = tonumber(d.players.playing), tonumber(d.players.max)
+        end
+    elseif tonumber(d.playing) and tonumber(d.max) then
+        pC, pM = tonumber(d.playing), tonumber(d.max)
+    end
+    -- 2) fallback: parse tail of "info": "... - 6/8"
+    if (not pC or not pM) and type(d.info)=="string" then
+        local a,b = d.info:match("(%d+)%s*/%s*(%d+)%s*$")
+        if a and b then pC, pM = tonumber(a), tonumber(b) end
+    end
+    return pC, pM
+end
+
+-- MICRO UI
 local function makeUI()
     local sg = Instance.new("ScreenGui")
     sg.Name = ("wsui_%d"):format(math.random(10^6,10^7-1))
-    sg.IgnoreGuiInset = true
     sg.ResetOnSpawn = false
+    sg.IgnoreGuiInset = true
     sg.Parent = (gethui and gethui()) or game:GetService("CoreGui")
 
     local root = Instance.new("Frame")
-    root.Name = "Root"
     root.Size = UDim2.fromOffset(WINDOW_SIZE.X, WINDOW_SIZE.Y)
-    root.Position = UDim2.fromScale(0.5,0.5)
-    root.AnchorPoint = Vector2.new(0.5,0.5)
-    root.BackgroundColor3 = Color3.fromRGB(24, 26, 30)
-    root.BorderSizePixel = 0
+    root.Position = UDim2.fromScale(0.5,0.5); root.AnchorPoint = Vector2.new(0.5,0.5)
+    root.BackgroundColor3 = Color3.fromRGB(24,26,30); root.BorderSizePixel = 0
     root.Parent = sg
-
-    local corner = Instance.new("UICorner", root); corner.CornerRadius = UDim.new(0,12)
+    Instance.new("UICorner", root).CornerRadius = UDim.new(0,12)
     local stroke = Instance.new("UIStroke", root); stroke.Thickness = 1; stroke.Color = Color3.fromRGB(60,65,72)
 
-    -- Drag
+    -- drag
     do
         local dragging, dragStart, startPos
         root.InputBegan:Connect(function(i)
-            if i.UserInputType == Enum.UserInputType.MouseButton1 then
-                dragging = true; dragStart = i.Position; startPos = root.Position
-                i.Changed:Connect(function()
-                    if i.UserInputState == Enum.UserInputState.End then dragging=false end
-                end)
+            if i.UserInputType==Enum.UserInputType.MouseButton1 then
+                dragging=true; dragStart=i.Position; startPos=root.Position
+                i.Changed:Connect(function() if i.UserInputState==Enum.UserInputState.End then dragging=false end end)
             end
         end)
         root.InputChanged:Connect(function(i)
-            if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
-                local delta = i.Position - dragStart
-                root.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            if dragging and i.UserInputType==Enum.UserInputType.MouseMovement then
+                local d=i.Position-dragStart
+                root.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y)
             end
         end)
     end
 
     local header = Instance.new("Frame")
-    header.Name = "Header"
     header.BackgroundTransparency = 1
-    header.Size = UDim2.new(1, -20, 0, 44)
-    header.Position = UDim2.fromOffset(10, 8)
+    header.Size = UDim2.new(1,-20,0,44)
+    header.Position = UDim2.fromOffset(10,8)
     header.Parent = root
 
     local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, 0, 1, 0)
     title.BackgroundTransparency = 1
+    title.Size = UDim2.new(1,0,1,0)
     title.Text = TITLE
-    title.TextColor3 = Color3.fromRGB(235, 238, 243)
-    title.Font = Enum.Font.GothamBold
-    title.TextSize = 18
+    title.TextColor3 = Color3.fromRGB(235,238,243)
+    title.Font = Enum.Font.GothamBold; title.TextSize = 18
     title.TextXAlignment = Enum.TextXAlignment.Left
     title.Parent = header
 
     local status = Instance.new("TextLabel")
-    status.Name = "Status"
-    status.AnchorPoint = Vector2.new(1, 0.5)
-    status.Position = UDim2.new(1, 0, 0.5, 0)
-    status.Size = UDim2.fromOffset(200, 20)
-    status.BackgroundTransparency = 1
+    status.Name = "Status"; status.BackgroundTransparency = 1
+    status.AnchorPoint = Vector2.new(1,0.5); status.Position = UDim2.new(1,0,0.5,0)
+    status.Size = UDim2.fromOffset(260,20)
     status.Text = "Connecting…"
-    status.TextColor3 = Color3.fromRGB(160, 167, 176)
-    status.Font = Enum.Font.GothamSemibold
-    status.TextSize = 14
+    status.TextColor3 = Color3.fromRGB(160,167,176)
+    status.Font = Enum.Font.GothamSemibold; status.TextSize = 14
     status.TextXAlignment = Enum.TextXAlignment.Right
     status.Parent = header
 
     local head = Instance.new("Frame")
-    head.Name = "TableHeader"
     head.BackgroundTransparency = 1
-    head.Size = UDim2.new(1, -20, 0, 24)
-    head.Position = UDim2.fromOffset(10, 54)
+    head.Size = UDim2.new(1,-20,0,24)
+    head.Position = UDim2.fromOffset(10,54)
     head.Parent = root
+
     local function addHead(txt, x, w)
         local l = Instance.new("TextLabel")
-        l.BackgroundTransparency = 1
-        l.Text = txt
+        l.BackgroundTransparency = 1; l.Text = txt
         l.TextColor3 = Color3.fromRGB(150,156,166)
-        l.Font = Enum.Font.GothamMedium
-        l.TextSize = 13
+        l.Font = Enum.Font.GothamMedium; l.TextSize = 13
         l.TextXAlignment = Enum.TextXAlignment.Left
-        l.Position = UDim2.new(0, x, 0, 0)
-        l.Size = UDim2.new(0, w, 1, 0)
-        l.Parent = head
-        return l
+        l.Position = UDim2.new(0,x,0,0); l.Size = UDim2.new(0,w,1,0)
+        l.Parent = head; return l
     end
-    addHead("Pet",  0, 280)
-    addHead("$/s", 280, 120)
-    addHead("Join",400, 140)
+    local COL = {PET_X=0, PET_W=260, MONEY_X=260, MONEY_W=120, PLAY_X=380, PLAY_W=90, JOIN_X=480, JOIN_W=130}
+    addHead("Pet",     COL.PET_X,  COL.PET_W)
+    addHead("$/s",     COL.MONEY_X,COL.MONEY_W)
+    addHead("Players", COL.PLAY_X, COL.PLAY_W)
+    addHead("Join",    COL.JOIN_X, COL.JOIN_W)
 
     local listHolder = Instance.new("Frame")
-    listHolder.Name = "ListHolder"
     listHolder.BackgroundTransparency = 1
-    listHolder.Size = UDim2.new(1, -20, 1, -96)
-    listHolder.Position = UDim2.fromOffset(10, 84)
+    listHolder.Size = UDim2.new(1,-20,1,-96)
+    listHolder.Position = UDim2.fromOffset(10,84)
     listHolder.Parent = root
 
     local scroll = Instance.new("ScrollingFrame")
-    scroll.Name = "Rows"
-    scroll.Active = true
-    scroll.BorderSizePixel = 0
-    scroll.BackgroundTransparency = 1
-    scroll.ScrollBarImageTransparency = 0.5
+    scroll.Active = true; scroll.BorderSizePixel=0; scroll.BackgroundTransparency=1
+    scroll.ScrollBarImageTransparency=0.5
     scroll.Size = UDim2.fromScale(1,1)
     scroll.CanvasSize = UDim2.new(0,0,0,0)
     scroll.Parent = listHolder
 
     local uiList = Instance.new("UIListLayout")
     uiList.SortOrder = Enum.SortOrder.LayoutOrder
-    uiList.Padding = UDim.new(0,6)
-    uiList.Parent = scroll
+    uiList.Padding = UDim.new(0,6); uiList.Parent = scroll
     uiList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
         scroll.CanvasSize = UDim2.new(0,0,0,uiList.AbsoluteContentSize.Y)
     end)
 
-    -- Row factory
     local function makeRow()
         local f = Instance.new("Frame")
-        f.Size = UDim2.new(1, 0, 0, 34)
-        f.BackgroundColor3 = Color3.fromRGB(31, 34, 39)
-        f.BorderSizePixel = 0
+        f.Size = UDim2.new(1,0,0,34)
+        f.BackgroundColor3 = Color3.fromRGB(31,34,39); f.BorderSizePixel=0
         f.Parent = scroll
-        local c = Instance.new("UICorner", f); c.CornerRadius = UDim.new(0,8)
-        local s = Instance.new("UIStroke", f); s.Thickness = 1; s.Color = Color3.fromRGB(52,56,63)
+        Instance.new("UICorner", f).CornerRadius=UDim.new(0,8)
+        local s = Instance.new("UIStroke", f); s.Thickness=1; s.Color=Color3.fromRGB(52,56,63)
 
         local pet = Instance.new("TextLabel")
-        pet.Name = "Pet"
-        pet.BackgroundTransparency = 1
-        pet.Position = UDim2.fromOffset(10,0)
-        pet.Size = UDim2.new(0, 270, 1, 0)
-        pet.TextXAlignment = Enum.TextXAlignment.Left
-        pet.TextColor3 = Color3.fromRGB(220,224,230)
-        pet.Font = Enum.Font.GothamSemibold
-        pet.TextSize = 14
-        pet.Parent = f
+        pet.Name="Pet"; pet.BackgroundTransparency=1
+        pet.Position=UDim2.fromOffset(10,0); pet.Size=UDim2.new(0,250,1,0)
+        pet.TextXAlignment=Enum.TextXAlignment.Left
+        pet.TextColor3=Color3.fromRGB(220,224,230)
+        pet.Font=Enum.Font.GothamSemibold; pet.TextSize=14; pet.Parent=f
 
         local money = Instance.new("TextLabel")
-        money.Name = "Money"
-        money.BackgroundTransparency = 1
-        money.Position = UDim2.fromOffset(280,0)
-        money.Size = UDim2.new(0,110,1,0)
-        money.TextColor3 = Color3.fromRGB(220,224,230)
-        money.Font = Enum.Font.Gotham
-        money.TextSize = 14
-        money.TextXAlignment = Enum.TextXAlignment.Left
-        money.Parent = f
+        money.Name="Money"; money.BackgroundTransparency=1
+        money.Position=UDim2.fromOffset(260,0); money.Size=UDim2.new(0,110,1,0)
+        money.TextXAlignment=Enum.TextXAlignment.Left
+        money.TextColor3=Color3.fromRGB(220,224,230)
+        money.Font=Enum.Font.Gotham; money.TextSize=14; money.Parent=f
+
+        local players = Instance.new("TextLabel")
+        players.Name="Players"; players.BackgroundTransparency=1
+        players.Position=UDim2.fromOffset(380,0); players.Size=UDim2.new(0,80,1,0)
+        players.TextXAlignment=Enum.TextXAlignment.Left
+        players.TextColor3=Color3.fromRGB(220,224,230)
+        players.Font=Enum.Font.Gotham; players.TextSize=14; players.Parent=f
 
         local btn = Instance.new("TextButton")
-        btn.Name = "Join"
-        btn.Position = UDim2.fromOffset(400, 5)
-        btn.Size = UDim2.fromOffset(120, 24)
-        btn.BackgroundColor3 = Color3.fromRGB(59, 130, 246)
-        btn.TextColor3 = Color3.fromRGB(245, 247, 250)
-        btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 14
-        btn.Text = "Join"
-        btn.AutoButtonColor = false
-        btn.Parent = f
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0,8)
-        local st = Instance.new("UIStroke", btn); st.Color = Color3.fromRGB(40, 103, 212)
+        btn.Name="Join"; btn.Position=UDim2.fromOffset(480,5); btn.Size=UDim2.fromOffset(130,24)
+        btn.BackgroundColor3=Color3.fromRGB(59,130,246)
+        btn.TextColor3=Color3.fromRGB(245,247,250)
+        btn.Font=Enum.Font.GothamBold; btn.TextSize=14; btn.Text="Join"
+        btn.AutoButtonColor=false; btn.Parent=f
+        Instance.new("UICorner", btn).CornerRadius=UDim.new(0,8)
+        local st=Instance.new("UIStroke", btn); st.Color=Color3.fromRGB(40,103,212)
+        btn.MouseEnter:Connect(function() btn.BackgroundColor3=Color3.fromRGB(66,140,255) end)
+        btn.MouseLeave:Connect(function() btn.BackgroundColor3=Color3.fromRGB(59,130,246) end)
 
-        btn.MouseEnter:Connect(function() btn.BackgroundColor3 = Color3.fromRGB(66, 140, 255) end)
-        btn.MouseLeave:Connect(function() btn.BackgroundColor3 = Color3.fromRGB(59, 130, 246) end)
-
-        return f, pet, money, btn
+        return f, pet, money, players, btn
     end
 
-    return {
-        gui = sg,
-        root = root,
-        status = status,
-        scroll = scroll,
-        makeRow = makeRow
-    }
+    return {gui=sg, root=root, status=status, scroll=scroll, makeRow=makeRow}
 end
 
--- ========== MODEL ==========
 local UI = makeUI()
 
-local rows = {}  -- key: jobId (or join_script) -> {frame=?, pet=?, money=?, btn=?, last=clock, moneyValue=?, joinScript=?, placeId=?, jobId=?}
-local function keyFrom(data)
-    -- primary: game_instance_id (job id). fallback: join_script. fallback2: channel+name.
-    return data.game_instance_id or data.join_script or (tostring(data.channel or "?").."|"..tostring(data.name or "?"))
+-- rows keyed by stable id; also secondary index by jobId
+local rows, byJob = {}, {}
+
+local function makeKey(d)
+    if d.game_instance_id then return "job:"..tostring(d.game_instance_id) end
+    if d.join_script then return "js:"..tostring(d.join_script) end
+    return ("nc:%s|%s"):format(tostring(d.name or "?"), tostring(d.channel or "?"))
 end
 
 local function ensureRow(k)
     local r = rows[k]
     if r then return r end
-    local f, pet, money, btn = UI.makeRow()
-    r = {frame=f, pet=pet, money=money, btn=btn, last=0, moneyValue=0, joinScript=nil, placeId=nil, jobId=nil}
+    local f, pet, money, players, btn = UI.makeRow()
+    r = {
+        key=k, frame=f, pet=pet, money=money, players=players, btn=btn,
+        last=0, moneyValue=0, joinScript=nil, placeId=nil, jobId=nil,
+        pCount=nil, pMax=nil, isFull=false, _btnHooked=false, _stale=false
+    }
     rows[k] = r
     return r
 end
 
+local function reindexJob(r)
+    if r.jobId then byJob[tostring(r.jobId)] = r end
+end
+
+local function findRowFor(d)
+    -- prefer existing by job id, then by chosen key, then by name|channel
+    if d.game_instance_id and byJob[tostring(d.game_instance_id)] then
+        return byJob[tostring(d.game_instance_id)]
+    end
+    local k = makeKey(d)
+    if rows[k] then return rows[k] end
+    local alt = ("nc:%s|%s"):format(tostring(d.name or "?"), tostring(d.channel or "?"))
+    if rows[alt] then return rows[alt] end
+    return ensureRow(k)
+end
+
 local function setStaleVisual(r, stale)
     if stale then
-        r.frame.BackgroundColor3 = Color3.fromRGB(26, 28, 32)
+        r.frame.BackgroundColor3 = Color3.fromRGB(26,28,32)
         r.pet.TextColor3   = Color3.fromRGB(150,156,166)
         r.money.TextColor3 = Color3.fromRGB(150,156,166)
+        r.players.TextColor3 = Color3.fromRGB(150,156,166)
     else
-        r.frame.BackgroundColor3 = Color3.fromRGB(31, 34, 39)
+        r.frame.BackgroundColor3 = Color3.fromRGB(31,34,39)
         r.pet.TextColor3   = Color3.fromRGB(220,224,230)
         r.money.TextColor3 = Color3.fromRGB(220,224,230)
+        r.players.TextColor3 = Color3.fromRGB(220,224,230)
     end
-    r.btn.Active = true  -- always clickable even if stale
+    r.btn.Active = true
     r.btn.AutoButtonColor = not stale
 end
 
-local function updateRowFromData(data)
-    -- Expected fields (per your feed): name, money (string), join_script, place_id, game_instance_id
-    local k = keyFrom(data)
-    local r = ensureRow(k)
+local function updateRowFromData(d)
+    local r = findRowFor(d)
 
-    local name  = tostring(data.name or "Unknown")
-    local moneyStr = tostring(data.money or data.money_per_sec or "?")
-    local mv    = parseMoney(moneyStr)
-
-    r.pet.Text   = name
+    -- core fields
+    r.pet.Text   = tostring(d.name or "Unknown")
+    local moneyStr = tostring(d.money or d.money_per_sec or "?")
     r.money.Text = moneyStr
-    r.moneyValue = mv
+    r.moneyValue = parseMoney(moneyStr)
     r.last       = os.clock()
-    r.joinScript = data.join_script
-    r.placeId    = data.place_id
-    r.jobId      = data.game_instance_id
 
-    r.btn.Text = "Join"
-    r.btn.MouseButton1Click:Connect(function()
-        -- Prefer running the provided join_script to avoid placeId type cast pitfalls.
-        if r.joinScript and type(loadstring)=="function" then
-            local ok, err = pcall(function() loadstring(r.joinScript)() end)
-            if not ok then r.btn.Text = "Error"; task.delay(1, function() r.btn.Text = "Join" end) end
-        elseif r.placeId and r.jobId then
-            -- Fallback: numeric call. Ensure number cast can handle big ids in your context.
-            local pid = tonumber(r.placeId) or r.placeId
-            pcall(function() TeleportService:TeleportToPlaceInstance(pid, r.jobId, LocalPlayer) end)
-        else
-            r.btn.Text = "No data"; task.delay(1, function() r.btn.Text = "Join" end)
-        end
-    end)
+    -- join data
+    if d.join_script then r.joinScript = d.join_script end
+    if d.place_id then r.placeId = d.place_id end
+    if d.game_instance_id then r.jobId = d.game_instance_id end
+    reindexJob(r)
+
+    -- players
+    local c, m = parsePlayers(d)
+    if c and m then
+        r.pCount, r.pMax = c, m
+        r.players.Text   = ("%d/%d"):format(c,m)
+        r.isFull         = (m > 0 and c >= m) or false
+        r.frame.Visible  = not r.isFull
+    else
+        r.players.Text = "…"
+        r.isFull       = false
+        r.frame.Visible= true
+    end
+
+    -- Join button (hook once; uses latest fields on click)
+    if not r._btnHooked then
+        r._btnHooked = true
+        r.btn.MouseButton1Click:Connect(function()
+            if r.joinScript and type(loadstring)=="function" then
+                local ok = pcall(function() loadstring(r.joinScript)() end)
+                if not ok then r.btn.Text="Error"; task.delay(1,function() r.btn.Text="Join" end) end
+            elseif r.placeId and r.jobId then
+                local pid = tonumber(r.placeId) or r.placeId
+                pcall(function() TeleportService:TeleportToPlaceInstance(pid, tostring(r.jobId), LocalPlayer) end)
+            else
+                -- нет данных для телепорта сейчас — подсветим и вернём надпись
+                r.btn.Text="No data"; task.delay(0.8,function() r.btn.Text="Join" end)
+            end
+        end)
+    end
 end
 
--- Sort + repaint loop
+-- сортировка/перерисовка
 task.spawn(function()
     while UI.gui.Parent do
         local now = os.clock()
-        -- Build sortable list
         local arr = {}
-        for k, r in pairs(rows) do
-            local stale = (now - (r.last or 0)) > STALE_AFTER
-            r._stale = stale
-            table.insert(arr, r)
+        for _, r in pairs(rows) do
+            r._stale = (now - (r.last or 0)) > STALE_AFTER
+            if not r.isFull then table.insert(arr, r) end
         end
         table.sort(arr, function(a,b)
-            if a._stale ~= b._stale then
-                return (not a._stale) and true or false  -- non-stale first
-            end
-            if a.moneyValue ~= b.moneyValue then
-                return a.moneyValue > b.moneyValue       -- desc by money
-            end
-            return (a.last or 0) > (b.last or 0)         -- newest first
+            if a._stale ~= b._stale then return (not a._stale) end
+            if a.moneyValue ~= b.moneyValue then return a.moneyValue > b.moneyValue end
+            local ac = a.pCount or -1; local bc = b.pCount or -1
+            if ac ~= bc then return ac < bc end
+            return (a.last or 0) > (b.last or 0)
         end)
-        -- Layout & color
         for i, r in ipairs(arr) do
             r.frame.LayoutOrder = i
             setStaleVisual(r, r._stale)
@@ -330,33 +331,29 @@ task.spawn(function()
     end
 end)
 
--- ========== WS HANDLERS ==========
+-- WS handlers
 local function handlePayload(json)
     local ok, obj = pcall(function() return HttpService:JSONDecode(json) end)
-    if not ok or type(obj) ~= "table" then return end
+    if not ok or type(obj)~="table" then return end
 
-    -- status banner
     if obj.type == "waiting" and obj.message then
         UI.status.Text = tostring(obj.message)
     end
 
-    -- main update types
-    if (obj.type == "server_update" or obj.type == "snapshot") and type(obj.data)=="table" then
+    if (obj.type=="server_update" or obj.type=="snapshot") and type(obj.data)=="table" then
         updateRowFromData(obj.data)
         UI.status.Text = ("Channel: %s"):format(tostring(obj.money_range or obj.channel or ""))
     end
 
-    -- optional: if the server sends "script" type with server_info
-    if obj.type == "script" and type(obj.server_info)=="table" then
+    if obj.type=="script" and type(obj.server_info)=="table" then
         local d = obj.server_info
         d.join_script = obj.script or d.join_script
         updateRowFromData(d)
     end
 
-    -- (Optional) Batch ingest if your backend includes 'all_data'
     if type(obj.all_data)=="table" then
         for _, d in pairs(obj.all_data) do
-            if type(d)=="table" and (d.join_script or (d.place_id and d.game_instance_id)) then
+            if type(d)=="table" then
                 d.money = d.money or d.money_per_sec
                 updateRowFromData(d)
             end
@@ -364,39 +361,28 @@ local function handlePayload(json)
     end
 end
 
--- ========== CONNECT ==========
+-- connect & loop
 task.spawn(function()
     local ws
     local function setStatus(s) UI.status.Text = s end
     while UI.gui.Parent do
-        local ok, err = pcall(function()
+        local ok = pcall(function()
             setStatus("Connecting…")
             ws = connectWS(WS_URL)
             setStatus("Connected")
-            -- Hook message event or fallback to Receive loop
-            local hooked = false
+            local hooked=false
             if ws.OnMessage and typeof(ws.OnMessage)=="RBXScriptSignal" then
-                ws.OnMessage:Connect(handlePayload)
-                hooked = true
+                ws.OnMessage:Connect(handlePayload); hooked=true
             end
             if ws.OnClose and typeof(ws.OnClose)=="RBXScriptSignal" then
                 ws.OnClose:Connect(function() setStatus("Disconnected — reconnecting…") end)
             end
             if not hooked and ws.Receive then
-                -- fallback pull
-                while true do
-                    local msg = ws:Receive()
-                    if not msg then break end
-                    handlePayload(msg)
-                end
+                while true do local msg=ws:Receive(); if not msg then break end; handlePayload(msg) end
             else
-                -- passive mode: keep thread alive
                 while true do task.wait(5) end
             end
         end)
-        if not ok then
-            setStatus("WS error, retrying in 5s…")
-            task.wait(5)
-        end
+        if not ok then setStatus("WS error, retrying in 5s…"); task.wait(5) end
     end
 end)
