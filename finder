@@ -1,4 +1,4 @@
--- WS Pets Table — placeId = game.PlaceId; supports job_id_pc; ALL channels
+-- WS Pets Table — with teleport logging (file + console)
 -- WS: ws://5.255.97.147:6767/script
 
 local WS_URL        = "ws://5.255.97.147:6767/script"
@@ -12,10 +12,87 @@ local HttpService     = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local LocalPlayer     = Players.LocalPlayer
 
--- === placeId всегда из текущей сессии ===
-local PLACE_ID_NUM = game.PlaceId -- это число (int64)
+-- placeId всегда из текущей игры
+local PLACE_ID_NUM = game.PlaceId
 
--- WebSocket (executor)
+-- ================= LOGGING =================
+local LOG_PATH = "WS_Teleport_Log.txt"
+local TP_SEQ = 0
+local LAST_TP_ID = nil
+
+local function now_str()
+    local ok, s = pcall(function() return os.date("%Y-%m-%d %H:%M:%S") end)
+    return ok and s or "time-unknown"
+end
+
+-- безопасный append в файл (или print)
+local function append_line(line)
+    line = tostring(line)
+    if appendfile then
+        appendfile(LOG_PATH, line .. "\n")
+    elseif writefile then
+        local prev = ""
+        if isfile and isfile(LOG_PATH) and readfile then
+            prev = readfile(LOG_PATH) or ""
+        end
+        writefile(LOG_PATH, prev .. line .. "\n")
+    else
+        print(line)
+    end
+end
+
+local function jenc(tbl)
+    local ok, s = pcall(function() return HttpService:JSONEncode(tbl) end)
+    return ok and s or "<json-encode-failed>"
+end
+
+local function log_event(kind, data)
+    local entry = {
+        ts   = now_str(),
+        kind = kind,
+        data = data
+    }
+    append_line(jenc(entry))
+end
+
+local function build_script_str(placeId, jobId)
+    return string.format(
+        'game:GetService("TeleportService"):TeleportToPlaceInstance(%s,"%s", game.Players.LocalPlayer)',
+        tostring(placeId), tostring(jobId)
+    )
+end
+
+-- системные хуки телепорта
+local function hook_teleport_events(setStatus)
+    local hooked = false
+    if TeleportService.TeleportInitFailed and not _G.__WS_TP_INIT_HOOKED then
+        _G.__WS_TP_INIT_HOOKED = true
+        TeleportService.TeleportInitFailed:Connect(function(player, result, placeId, options)
+            log_event("TeleportInitFailed", {
+                tp_id = LAST_TP_ID,
+                player = player and player.Name or nil,
+                result = tostring(result),
+                placeId = tostring(placeId)
+            })
+            if setStatus then setStatus(("TP failed: %s"):format(tostring(result))) end
+        end)
+        hooked = true
+    end
+    if LocalPlayer and LocalPlayer.OnTeleport and not _G.__WS_TP_STATE_HOOKED then
+        _G.__WS_TP_STATE_HOOKED = true
+        LocalPlayer.OnTeleport:Connect(function(state, placeId, teleportOptions)
+            log_event("OnTeleport", {
+                tp_id = LAST_TP_ID,
+                state = tostring(state),
+                placeId = tostring(placeId)
+            })
+        end)
+        hooked = true
+    end
+    return hooked
+end
+
+-- ================= EXECUTOR WS =================
 local function connectWS(url)
     local ws
     if syn and syn.websocket and syn.websocket.connect then
@@ -29,7 +106,7 @@ local function connectWS(url)
     return ws
 end
 
--- Money text -> number (для отображения, не для сортировки)
+-- ================= PARSERS =================
 local suffix = {k=1e3,K=1e3,m=1e6,M=1e6,b=1e9,B=1e9,t=1e12,T=1e12}
 local function parseMoney(str)
     if type(str)~="string" then return 0 end
@@ -39,7 +116,6 @@ local function parseMoney(str)
     return num * (suffix[suf or ""] or 1)
 end
 
--- Players: "6/8", {playing,max}, playing/max, либо хвост info "... - 6/8"
 local function parsePlayers(d)
     local pC, pM
     if type(d.players)=="string" then
@@ -59,21 +135,20 @@ local function parsePlayers(d)
     return pC, pM
 end
 
--- Join: берем jobId из game_instance_id / job_id_pc / join_script; placeId = game.PlaceId
+-- jobId берём из game_instance_id / job_id_pc / join_script
 local function parseJoin(d)
     local jobId = nil
     if d.game_instance_id then jobId = tostring(d.game_instance_id) end
     if (not jobId) and d.job_id_pc then jobId = tostring(d.job_id_pc) end
     if (not jobId) and type(d.join_script)=="string" then
-        local j = d.join_script:match("TeleportToPlaceInstance%(%s*%d+%s*,%s*\"([%w%-%+/=]+)\"")
+        local j = d.join_script:match('TeleportToPlaceInstance%(%s*%d+%s*,%s*"([%w%-%+/=]+)"')
         if j then jobId = j end
     end
-    -- placeId всегда текущий
-    local placeId = PLACE_ID_NUM
-    return placeId, jobId
+    -- placeId = текущий
+    return PLACE_ID_NUM, jobId
 end
 
--- ===== MICRO UI =====
+-- ================= UI =================
 local function makeUI()
     local sg = Instance.new("ScreenGui")
     sg.Name = ("wsui_%d"):format(math.random(10^6,10^7-1))
@@ -124,7 +199,7 @@ local function makeUI()
     local status = Instance.new("TextLabel")
     status.Name = "Status"; status.BackgroundTransparency = 1
     status.AnchorPoint = Vector2.new(1,0.5); status.Position = UDim2.new(1,0,0.5,0)
-    status.Size = UDim2.fromOffset(320,20)
+    status.Size = UDim2.fromOffset(350,20)
     status.Text = "Connecting…"
     status.TextColor3 = Color3.fromRGB(160,167,176)
     status.Font = Enum.Font.GothamSemibold; status.TextSize = 14
@@ -219,8 +294,9 @@ local function makeUI()
 end
 
 local UI = makeUI()
+hook_teleport_events(function(s) UI.status.Text = s end)
 
--- ===== MODEL (key = jobId: GUID или job_id_pc). Сортировка: новые сверху =====
+-- ================= MODEL =================
 local rows = {}
 local function ensureRow(jobId)
     local r = rows[jobId]
@@ -231,7 +307,8 @@ local function ensureRow(jobId)
         last=0, firstSeen=os.clock(), moneyValue=0,
         placeId=PLACE_ID_NUM, jobId=jobId,
         pCount=nil, pMax=nil, isFull=false,
-        _btnHooked=false, _stale=false, _joinable=false
+        _btnHooked=false, _stale=false, _joinable=false,
+        provided_join_script=nil
     }
     rows[jobId] = r
     return r
@@ -253,26 +330,26 @@ local function setStaleVisual(r, stale)
 end
 
 local function updateRow(d)
-    -- 1) вычисляем placeId/jobId: placeId всегда из текущей игры
+    -- resolve IDs
     local placeId, jobId = parseJoin(d)
     if not jobId then
-        -- если jobId ещё нет — создаём временную строку с ключом name|channel (кнопка будет серой)
         jobId = (tostring(d.name or "?").."|"..tostring(d.channel or "?"))
     end
     local r = ensureRow(jobId)
 
-    r.placeId = PLACE_ID_NUM -- принудительно текущий placeId
-    r.jobId   = (placeId and jobId) and jobId or r.jobId
+    r.placeId = PLACE_ID_NUM
+    r.jobId   = (jobId and tostring(jobId)) or r.jobId
     r._joinable = (r.placeId ~= nil and r.jobId ~= nil and tostring(r.jobId) ~= "")
+    r.provided_join_script = d.join_script -- для лога
 
-    -- 2) базовые поля
+    -- basics
     r.pet.Text   = tostring(d.name or "Unknown")
     local mStr   = tostring(d.money or d.money_per_sec or "?")
     r.money.Text = mStr
     r.moneyValue = parseMoney(mStr)
     r.last       = os.clock()
 
-    -- 3) игроки + скрытие полных
+    -- players
     local c, m = parsePlayers(d)
     if c and m then
         r.pCount, r.pMax = c, m
@@ -285,16 +362,44 @@ local function updateRow(d)
         r.frame.Visible= true
     end
 
-    -- 4) Join (hook once)
+    -- Join button with LOGS
     if not r._btnHooked then
         r._btnHooked = true
         r.btn.MouseButton1Click:Connect(function()
+            local used_script = r.provided_join_script or build_script_str(PLACE_ID_NUM, r.jobId or "UNKNOWN")
+            TP_SEQ += 1
+            LAST_TP_ID = TP_SEQ
+
+            log_event("TP_ATTEMPT", {
+                tp_id = LAST_TP_ID,
+                placeId = tostring(PLACE_ID_NUM),
+                jobId = tostring(r.jobId or "nil"),
+                players = r.pCount and (("%d/%d"):format(r.pCount, r.pMax or 0)) or nil,
+                used_script = used_script
+            })
+
             if r._joinable then
-                pcall(function()
+                local ok, err = pcall(function()
                     TeleportService:TeleportToPlaceInstance(PLACE_ID_NUM, tostring(r.jobId), LocalPlayer)
                 end)
+                if not ok then
+                    UI.status.Text = "TP error (pcall). See log."
+                    log_event("TP_PCALL_ERROR", {
+                        tp_id = LAST_TP_ID,
+                        error = tostring(err),
+                        placeId = tostring(PLACE_ID_NUM),
+                        jobId = tostring(r.jobId or "nil"),
+                        used_script = used_script
+                    })
+                end
             else
-                r.btn.Text = "…"; task.delay(0.8, function() r.btn.Text = "Join" end)
+                UI.status.Text = "TP not joinable yet"
+                log_event("TP_NOT_JOINABLE", {
+                    tp_id = LAST_TP_ID,
+                    placeId = tostring(PLACE_ID_NUM),
+                    jobId = tostring(r.jobId or "nil"),
+                    used_script = used_script
+                })
             end
         end)
     end
@@ -308,7 +413,7 @@ local function updateRow(d)
     end
 end
 
--- Сортировка: по firstSeen (новые сверху), устаревшие вниз
+-- сортировка: новые сверху; устаревшие вниз
 task.spawn(function()
     while UI.gui.Parent do
         local now = os.clock()
@@ -330,7 +435,7 @@ task.spawn(function()
     end
 end)
 
--- WS ingest — все каналы
+-- ================= WS ingest (все каналы) =================
 local function handlePayload(json)
     local ok, obj = pcall(function() return HttpService:JSONDecode(json) end)
     if not ok or type(obj)~="table" then return end
@@ -353,7 +458,7 @@ local function handlePayload(json)
     end
 end
 
--- Connect loop
+-- ================= CONNECT =================
 task.spawn(function()
     local ws
     local function setStatus(s) UI.status.Text = s end
