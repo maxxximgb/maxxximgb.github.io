@@ -1,5 +1,5 @@
--- WS Pets Table (no external HTTP) + Players from socket + robust join
--- ws: ws://5.255.97.147:6767/script
+-- WS Pets Table — placeId = game.PlaceId; supports job_id_pc; ALL channels
+-- WS: ws://5.255.97.147:6767/script
 
 local WS_URL        = "ws://5.255.97.147:6767/script"
 local STALE_AFTER   = 45
@@ -11,6 +11,9 @@ local Players         = game:GetService("Players")
 local HttpService     = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local LocalPlayer     = Players.LocalPlayer
+
+-- === placeId всегда из текущей сессии ===
+local PLACE_ID_NUM = game.PlaceId -- это число (int64)
 
 -- WebSocket (executor)
 local function connectWS(url)
@@ -26,20 +29,18 @@ local function connectWS(url)
     return ws
 end
 
--- Money parser
+-- Money text -> number (для отображения, не для сортировки)
 local suffix = {k=1e3,K=1e3,m=1e6,M=1e6,b=1e9,B=1e9,t=1e12,T=1e12}
 local function parseMoney(str)
     if type(str)~="string" then return 0 end
     local s = str:gsub("%$", ""):gsub("/s",""):gsub("%s+","")
-    local num, suf = s:match("^([%d%.]+)([kKmMbBtT]?)$")
-    if not num then num, suf = s:match("^([%d%.]+)([kKmMbBtT]?).*$") end
+    local num, suf = s:match("^([%d%.]+)([kKmMbBtT]?)$") or s:match("^([%d%.]+)([kKmMbBtT]?).*$")
     num = tonumber(num or "0") or 0
     return num * (suffix[suf or ""] or 1)
 end
 
--- Players parser (from socket payload)
+-- Players: "6/8", {playing,max}, playing/max, либо хвост info "... - 6/8"
 local function parsePlayers(d)
-    -- 1) explicit "players": "6/8" or {playing,max}
     local pC, pM
     if type(d.players)=="string" then
         local a,b = d.players:match("(%d+)%s*/%s*(%d+)")
@@ -51,7 +52,6 @@ local function parsePlayers(d)
     elseif tonumber(d.playing) and tonumber(d.max) then
         pC, pM = tonumber(d.playing), tonumber(d.max)
     end
-    -- 2) fallback: parse tail of "info": "... - 6/8"
     if (not pC or not pM) and type(d.info)=="string" then
         local a,b = d.info:match("(%d+)%s*/%s*(%d+)%s*$")
         if a and b then pC, pM = tonumber(a), tonumber(b) end
@@ -59,7 +59,21 @@ local function parsePlayers(d)
     return pC, pM
 end
 
--- MICRO UI
+-- Join: берем jobId из game_instance_id / job_id_pc / join_script; placeId = game.PlaceId
+local function parseJoin(d)
+    local jobId = nil
+    if d.game_instance_id then jobId = tostring(d.game_instance_id) end
+    if (not jobId) and d.job_id_pc then jobId = tostring(d.job_id_pc) end
+    if (not jobId) and type(d.join_script)=="string" then
+        local j = d.join_script:match("TeleportToPlaceInstance%(%s*%d+%s*,%s*\"([%w%-%+/=]+)\"")
+        if j then jobId = j end
+    end
+    -- placeId всегда текущий
+    local placeId = PLACE_ID_NUM
+    return placeId, jobId
+end
+
+-- ===== MICRO UI =====
 local function makeUI()
     local sg = Instance.new("ScreenGui")
     sg.Name = ("wsui_%d"):format(math.random(10^6,10^7-1))
@@ -110,7 +124,7 @@ local function makeUI()
     local status = Instance.new("TextLabel")
     status.Name = "Status"; status.BackgroundTransparency = 1
     status.AnchorPoint = Vector2.new(1,0.5); status.Position = UDim2.new(1,0,0.5,0)
-    status.Size = UDim2.fromOffset(260,20)
+    status.Size = UDim2.fromOffset(320,20)
     status.Text = "Connecting…"
     status.TextColor3 = Color3.fromRGB(160,167,176)
     status.Font = Enum.Font.GothamSemibold; status.TextSize = 14
@@ -132,7 +146,7 @@ local function makeUI()
         l.Position = UDim2.new(0,x,0,0); l.Size = UDim2.new(0,w,1,0)
         l.Parent = head; return l
     end
-    local COL = {PET_X=0, PET_W=260, MONEY_X=260, MONEY_W=120, PLAY_X=380, PLAY_W=90, JOIN_X=480, JOIN_W=130}
+    local COL = {PET_X=0, PET_W=240, MONEY_X=240, MONEY_W=120, PLAY_X=360, PLAY_W=90, JOIN_X=450, JOIN_W=170}
     addHead("Pet",     COL.PET_X,  COL.PET_W)
     addHead("$/s",     COL.MONEY_X,COL.MONEY_W)
     addHead("Players", COL.PLAY_X, COL.PLAY_W)
@@ -168,27 +182,27 @@ local function makeUI()
 
         local pet = Instance.new("TextLabel")
         pet.Name="Pet"; pet.BackgroundTransparency=1
-        pet.Position=UDim2.fromOffset(10,0); pet.Size=UDim2.new(0,250,1,0)
+        pet.Position=UDim2.fromOffset(10,0); pet.Size=UDim2.new(0,230,1,0)
         pet.TextXAlignment=Enum.TextXAlignment.Left
         pet.TextColor3=Color3.fromRGB(220,224,230)
         pet.Font=Enum.Font.GothamSemibold; pet.TextSize=14; pet.Parent=f
 
         local money = Instance.new("TextLabel")
         money.Name="Money"; money.BackgroundTransparency=1
-        money.Position=UDim2.fromOffset(260,0); money.Size=UDim2.new(0,110,1,0)
+        money.Position=UDim2.fromOffset(240,0); money.Size=UDim2.new(0,110,1,0)
         money.TextXAlignment=Enum.TextXAlignment.Left
         money.TextColor3=Color3.fromRGB(220,224,230)
         money.Font=Enum.Font.Gotham; money.TextSize=14; money.Parent=f
 
         local players = Instance.new("TextLabel")
         players.Name="Players"; players.BackgroundTransparency=1
-        players.Position=UDim2.fromOffset(380,0); players.Size=UDim2.new(0,80,1,0)
+        players.Position=UDim2.fromOffset(360,0); players.Size=UDim2.new(0,80,1,0)
         players.TextXAlignment=Enum.TextXAlignment.Left
         players.TextColor3=Color3.fromRGB(220,224,230)
         players.Font=Enum.Font.Gotham; players.TextSize=14; players.Parent=f
 
         local btn = Instance.new("TextButton")
-        btn.Name="Join"; btn.Position=UDim2.fromOffset(480,5); btn.Size=UDim2.fromOffset(130,24)
+        btn.Name="Join"; btn.Position=UDim2.fromOffset(450,5); btn.Size=UDim2.fromOffset(160,24)
         btn.BackgroundColor3=Color3.fromRGB(59,130,246)
         btn.TextColor3=Color3.fromRGB(245,247,250)
         btn.Font=Enum.Font.GothamBold; btn.TextSize=14; btn.Text="Join"
@@ -206,42 +220,21 @@ end
 
 local UI = makeUI()
 
--- rows keyed by stable id; also secondary index by jobId
-local rows, byJob = {}, {}
-
-local function makeKey(d)
-    if d.game_instance_id then return "job:"..tostring(d.game_instance_id) end
-    if d.join_script then return "js:"..tostring(d.join_script) end
-    return ("nc:%s|%s"):format(tostring(d.name or "?"), tostring(d.channel or "?"))
-end
-
-local function ensureRow(k)
-    local r = rows[k]
+-- ===== MODEL (key = jobId: GUID или job_id_pc). Сортировка: новые сверху =====
+local rows = {}
+local function ensureRow(jobId)
+    local r = rows[jobId]
     if r then return r end
     local f, pet, money, players, btn = UI.makeRow()
     r = {
-        key=k, frame=f, pet=pet, money=money, players=players, btn=btn,
-        last=0, moneyValue=0, joinScript=nil, placeId=nil, jobId=nil,
-        pCount=nil, pMax=nil, isFull=false, _btnHooked=false, _stale=false
+        key=jobId, frame=f, pet=pet, money=money, players=players, btn=btn,
+        last=0, firstSeen=os.clock(), moneyValue=0,
+        placeId=PLACE_ID_NUM, jobId=jobId,
+        pCount=nil, pMax=nil, isFull=false,
+        _btnHooked=false, _stale=false, _joinable=false
     }
-    rows[k] = r
+    rows[jobId] = r
     return r
-end
-
-local function reindexJob(r)
-    if r.jobId then byJob[tostring(r.jobId)] = r end
-end
-
-local function findRowFor(d)
-    -- prefer existing by job id, then by chosen key, then by name|channel
-    if d.game_instance_id and byJob[tostring(d.game_instance_id)] then
-        return byJob[tostring(d.game_instance_id)]
-    end
-    local k = makeKey(d)
-    if rows[k] then return rows[k] end
-    local alt = ("nc:%s|%s"):format(tostring(d.name or "?"), tostring(d.channel or "?"))
-    if rows[alt] then return rows[alt] end
-    return ensureRow(k)
 end
 
 local function setStaleVisual(r, stale)
@@ -256,32 +249,35 @@ local function setStaleVisual(r, stale)
         r.money.TextColor3 = Color3.fromRGB(220,224,230)
         r.players.TextColor3 = Color3.fromRGB(220,224,230)
     end
-    r.btn.Active = true
     r.btn.AutoButtonColor = not stale
 end
 
-local function updateRowFromData(d)
-    local r = findRowFor(d)
+local function updateRow(d)
+    -- 1) вычисляем placeId/jobId: placeId всегда из текущей игры
+    local placeId, jobId = parseJoin(d)
+    if not jobId then
+        -- если jobId ещё нет — создаём временную строку с ключом name|channel (кнопка будет серой)
+        jobId = (tostring(d.name or "?").."|"..tostring(d.channel or "?"))
+    end
+    local r = ensureRow(jobId)
 
-    -- core fields
+    r.placeId = PLACE_ID_NUM -- принудительно текущий placeId
+    r.jobId   = (placeId and jobId) and jobId or r.jobId
+    r._joinable = (r.placeId ~= nil and r.jobId ~= nil and tostring(r.jobId) ~= "")
+
+    -- 2) базовые поля
     r.pet.Text   = tostring(d.name or "Unknown")
-    local moneyStr = tostring(d.money or d.money_per_sec or "?")
-    r.money.Text = moneyStr
-    r.moneyValue = parseMoney(moneyStr)
+    local mStr   = tostring(d.money or d.money_per_sec or "?")
+    r.money.Text = mStr
+    r.moneyValue = parseMoney(mStr)
     r.last       = os.clock()
 
-    -- join data
-    if d.join_script then r.joinScript = d.join_script end
-    if d.place_id then r.placeId = d.place_id end
-    if d.game_instance_id then r.jobId = d.game_instance_id end
-    reindexJob(r)
-
-    -- players
+    -- 3) игроки + скрытие полных
     local c, m = parsePlayers(d)
     if c and m then
         r.pCount, r.pMax = c, m
-        r.players.Text   = ("%d/%d"):format(c,m)
-        r.isFull         = (m > 0 and c >= m) or false
+        r.players.Text   = ("%d/%d"):format(c, m)
+        r.isFull         = (m > 0 and c >= m)
         r.frame.Visible  = not r.isFull
     else
         r.players.Text = "…"
@@ -289,25 +285,30 @@ local function updateRowFromData(d)
         r.frame.Visible= true
     end
 
-    -- Join button (hook once; uses latest fields on click)
+    -- 4) Join (hook once)
     if not r._btnHooked then
         r._btnHooked = true
         r.btn.MouseButton1Click:Connect(function()
-            if r.joinScript and type(loadstring)=="function" then
-                local ok = pcall(function() loadstring(r.joinScript)() end)
-                if not ok then r.btn.Text="Error"; task.delay(1,function() r.btn.Text="Join" end) end
-            elseif r.placeId and r.jobId then
-                local pid = tonumber(r.placeId) or r.placeId
-                pcall(function() TeleportService:TeleportToPlaceInstance(pid, tostring(r.jobId), LocalPlayer) end)
+            if r._joinable then
+                pcall(function()
+                    TeleportService:TeleportToPlaceInstance(PLACE_ID_NUM, tostring(r.jobId), LocalPlayer)
+                end)
             else
-                -- нет данных для телепорта сейчас — подсветим и вернём надпись
-                r.btn.Text="No data"; task.delay(0.8,function() r.btn.Text="Join" end)
+                r.btn.Text = "…"; task.delay(0.8, function() r.btn.Text = "Join" end)
             end
         end)
     end
+
+    if r._joinable then
+        r.btn.BackgroundColor3 = Color3.fromRGB(59,130,246)
+        r.btn.Text = "Join"
+    else
+        r.btn.BackgroundColor3 = Color3.fromRGB(75,80,90)
+        r.btn.Text = "Join"
+    end
 end
 
--- сортировка/перерисовка
+-- Сортировка: по firstSeen (новые сверху), устаревшие вниз
 task.spawn(function()
     while UI.gui.Parent do
         local now = os.clock()
@@ -318,9 +319,7 @@ task.spawn(function()
         end
         table.sort(arr, function(a,b)
             if a._stale ~= b._stale then return (not a._stale) end
-            if a.moneyValue ~= b.moneyValue then return a.moneyValue > b.moneyValue end
-            local ac = a.pCount or -1; local bc = b.pCount or -1
-            if ac ~= bc then return ac < bc end
+            if a.firstSeen ~= b.firstSeen then return a.firstSeen > b.firstSeen end
             return (a.last or 0) > (b.last or 0)
         end)
         for i, r in ipairs(arr) do
@@ -331,37 +330,30 @@ task.spawn(function()
     end
 end)
 
--- WS handlers
+-- WS ingest — все каналы
 local function handlePayload(json)
     local ok, obj = pcall(function() return HttpService:JSONDecode(json) end)
     if not ok or type(obj)~="table" then return end
 
-    if obj.type == "waiting" and obj.message then
-        UI.status.Text = tostring(obj.message)
+    if obj.type == "waiting" then
+        UI.status.Text = (obj.message and tostring(obj.message)) or "Waiting…"
     end
-
     if (obj.type=="server_update" or obj.type=="snapshot") and type(obj.data)=="table" then
-        updateRowFromData(obj.data)
-        UI.status.Text = ("Channel: %s"):format(tostring(obj.money_range or obj.channel or ""))
+        updateRow(obj.data)
     end
-
     if obj.type=="script" and type(obj.server_info)=="table" then
         local d = obj.server_info
         d.join_script = obj.script or d.join_script
-        updateRowFromData(d)
+        updateRow(d)
     end
-
     if type(obj.all_data)=="table" then
         for _, d in pairs(obj.all_data) do
-            if type(d)=="table" then
-                d.money = d.money or d.money_per_sec
-                updateRowFromData(d)
-            end
+            if type(d)=="table" then updateRow(d) end
         end
     end
 end
 
--- connect & loop
+-- Connect loop
 task.spawn(function()
     local ws
     local function setStatus(s) UI.status.Text = s end
@@ -369,7 +361,7 @@ task.spawn(function()
         local ok = pcall(function()
             setStatus("Connecting…")
             ws = connectWS(WS_URL)
-            setStatus("Connected")
+            setStatus("Connected — listening ALL")
             local hooked=false
             if ws.OnMessage and typeof(ws.OnMessage)=="RBXScriptSignal" then
                 ws.OnMessage:Connect(handlePayload); hooked=true
