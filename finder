@@ -28,9 +28,7 @@ end
 -- безопасный append в файл (или print)
 local function append_line(line)
     line = tostring(line)
-    if appendfile then
-        appendfile(LOG_PATH, line .. "\n")
-    elseif writefile then
+    if writefile then
         local prev = ""
         if isfile and isfile(LOG_PATH) and readfile then
             prev = readfile(LOG_PATH) or ""
